@@ -1,72 +1,125 @@
 """Reproduce the final model artifacts from the cleaned CSV.
 
 Mirrors the experiment in notebooks/02_modeling.ipynb without depending on it:
-stratified split -> HistGradientBoosting -> cost-based threshold selection ->
-save model + metadata to models/.
 
-Usage: python src/train.py   (run from the project root)
+1. Stratified 60/20/20 train/validation/test split (random_state=42).
+2. Model selection on VALIDATION: each candidate's threshold is tuned on
+   validation (grid 0.10-0.90, step 0.05, minimizing
+   cost = 5*FN + 1*FP); the candidate with the lowest validation cost wins.
+3. Threshold is frozen at the validation-selected value; the frozen model is
+   evaluated ONCE on the held-out test set. The test set is never used for
+   any selection decision.
+4. Save model + metadata to models/.
+
+Cost assumption (illustrative, not a business fact): a missed defaulter
+(false negative) costs 5x a false alarm on a good customer (false positive).
+
+Usage (from the project root):
+    python -m src.train
 """
 import json
-import sys
 from pathlib import Path
 
 import joblib
+import numpy as np
 import pandas as pd
+from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (accuracy_score, confusion_matrix, f1_score,
                              precision_score, recall_score, roc_auc_score)
 from sklearn.model_selection import train_test_split
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from preprocessing import FEATURE_COLUMNS, TARGET
+from .preprocessing import FEATURE_COLUMNS, TARGET
 
 ROOT = Path(__file__).resolve().parent.parent
-THRESHOLD_GRID = [0.3, 0.5, 0.7]
-FN_COST, FP_COST = 5, 1  # stated assumption: a missed defaulter costs 5x a rejected good applicant
+THRESHOLD_GRID = [round(float(t), 2) for t in np.arange(0.10, 0.91, 0.05)]
+FN_COST, FP_COST = 5, 1  # illustrative assumption, see module docstring
+
+
+def cost_at(y_true, proba, threshold: float) -> int:
+    tn, fp, fn, tp = confusion_matrix(y_true, (proba >= threshold).astype(int)).ravel()
+    return FN_COST * fn + FP_COST * fp
+
+
+def best_threshold(y_true, proba) -> float:
+    """Lowest threshold minimizing cost; ties resolve to the lower threshold."""
+    return min(THRESHOLD_GRID, key=lambda t: cost_at(y_true, proba, t))
 
 
 def main() -> None:
     df = pd.read_csv(ROOT / "data" / "credit_default_clean.csv")
     X, y = df[FEATURE_COLUMNS], df[TARGET]
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.30, random_state=42, stratify=y)
+    X_train, X_rest, y_train, y_rest = train_test_split(
+        X, y, test_size=0.40, random_state=42, stratify=y)
+    X_val, X_test, y_val, y_test = train_test_split(
+        X_rest, y_rest, test_size=0.50, random_state=42, stratify=y_rest)
+    print(f"train={len(y_train)} val={len(y_val)} test={len(y_test)} "
+          f"(default rates {y_train.mean():.3f}/{y_val.mean():.3f}/{y_test.mean():.3f})")
 
-    model = HistGradientBoostingClassifier(random_state=42)
-    model.fit(X_train, y_train)
-    proba = model.predict_proba(X_test)[:, 1]
+    candidates = {
+        "logreg": make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000)),
+        "hgb": HistGradientBoostingClassifier(random_state=42),
+    }
 
-    best_cost, best_t = float("inf"), THRESHOLD_GRID[0]
-    for t in THRESHOLD_GRID:
-        tn, fp, fn, tp = confusion_matrix(y_test, (proba >= t).astype(int)).ravel()
-        cost = FN_COST * fn + FP_COST * fp
-        if cost < best_cost:
-            best_cost, best_t = cost, t
+    # --- model + threshold selection on VALIDATION only ---
+    val_results = {}
+    for name, model in candidates.items():
+        model.fit(X_train, y_train)
+        p_val = model.predict_proba(X_val)[:, 1]
+        t = best_threshold(y_val, p_val)
+        val_results[name] = (model, t, cost_at(y_val, p_val, t))
+        print(f"validation: {name:>6} best threshold {t:.2f} (cost {val_results[name][2]:,})")
 
-    p_final = (proba >= best_t).astype(int)
+    selected = min(val_results, key=lambda n: val_results[n][2])
+    model, threshold, val_cost = val_results[selected]
+    print(f"selected on validation: {selected} @ threshold {threshold:.2f}")
+
+    # --- freeze model + threshold; evaluate ONCE on the held-out test set ---
+    proba_test = model.predict_proba(X_test)[:, 1]
+    p_test = (proba_test >= threshold).astype(int)
+
+    baseline = DummyClassifier(strategy="most_frequent").fit(X_train, y_train)
+    base_acc = accuracy_score(y_test, baseline.predict(X_test))
+
+    test_metrics = {
+        "accuracy": round(float(accuracy_score(y_test, p_test)), 4),
+        "precision": round(float(precision_score(y_test, p_test)), 4),
+        "recall": round(float(recall_score(y_test, p_test)), 4),
+        "f1": round(float(f1_score(y_test, p_test)), 4),
+        "roc_auc": round(float(roc_auc_score(y_test, proba_test)), 4),
+        "baseline_accuracy": round(float(base_acc), 4),
+    }
+
     (ROOT / "models").mkdir(exist_ok=True)
     joblib.dump(model, ROOT / "models" / "model.joblib")
     meta = {
-        "model": "HistGradientBoostingClassifier(random_state=42)",
+        "model": f"{type(model).__name__}(selected on validation, "
+                 f"candidates: {sorted(candidates)})",
         "features": FEATURE_COLUMNS,
-        "threshold": float(best_t),
+        "split": "stratified 60/20/20 train/validation/test, random_state=42",
+        "threshold": float(threshold),
+        "threshold_selection": (
+            f"grid 0.10-0.90 step 0.05, cost = {FN_COST}*FN + {FP_COST}*FP, "
+            f"minimized on the VALIDATION set only (selected cost {val_cost:,}); "
+            "test set used once for final evaluation"
+        ),
         "threshold_cost_assumption": (
             f"cost = {FN_COST}*FN + {FP_COST}*FP "
-            "(missed defaulter costs 5x a rejected good applicant); "
-            "threshold minimizes this on the test set"
+            "(illustrative assumption: a missed defaulter costs 5x a false alarm "
+            "on a good customer); not an observed business fact"
         ),
-        "operating_metrics_at_threshold": {
-            "accuracy": round(float(accuracy_score(y_test, p_final)), 4),
-            "precision": round(float(precision_score(y_test, p_final)), 4),
-            "recall": round(float(recall_score(y_test, p_final)), 4),
-            "f1": round(float(f1_score(y_test, p_final)), 4),
-            "roc_auc": round(float(roc_auc_score(y_test, proba)), 4),
-        },
-        "data": "UCI default of credit card clients (Taiwan); 30000 rows; no timestamps (no out-of-time evaluation)",
+        "test_metrics_at_frozen_threshold": test_metrics,
+        "data": ("UCI default of credit card clients (Taiwan); 30000 rows; "
+                 "existing card customers with 6 months of history; no timestamps "
+                 "(no out-of-time evaluation)"),
     }
     with open(ROOT / "models" / "metadata.json", "w") as f:
         json.dump(meta, f, indent=2)
-    print(f"threshold={best_t}  f1={meta['operating_metrics_at_threshold']['f1']}")
+    print(f"frozen threshold={threshold:.2f}  test f1={test_metrics['f1']}")
     print("saved models/model.joblib + models/metadata.json")
 
 

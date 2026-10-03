@@ -1,13 +1,18 @@
-"""Credit-default decision service.
+"""Credit-default risk scoring service.
 
-POST /predict  -> default probability + decision at the configured threshold.
+POST /predict  -> default probability + review flag at the configured threshold.
 GET  /health   -> service + artifact status.
 
-Every decision is logged to SQLite (data/decisions.db): timestamp, SHA-256 of
+Every scored customer is logged to SQLite (data/decisions.db by default;
+override with the DECISIONS_DB environment variable): timestamp, SHA-256 of
 the canonical input, probability, threshold, decision.
+
+Run from the project root:
+    uvicorn src.app:app --reload
 """
 import hashlib
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,19 +22,25 @@ import pandas as pd
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-from preprocessing import FEATURE_COLUMNS, row_to_vector
+from .preprocessing import FEATURE_COLUMNS, row_to_vector
 
 ROOT = Path(__file__).resolve().parent.parent
-DB_PATH = ROOT / "data" / "decisions.db"
 
-app = FastAPI(title="Credit Default Decision Service")
+
+def _db_path() -> Path:
+    """Decision-log location; DECISIONS_DB overrides the default (used by tests)."""
+    override = os.environ.get("DECISIONS_DB")
+    return Path(override) if override else ROOT / "data" / "decisions.db"
+
+
+app = FastAPI(title="Credit Default Risk Scoring Service")
 
 _model = joblib.load(ROOT / "models" / "model.joblib")
 _metadata = json.loads((ROOT / "models" / "metadata.json").read_text())
 THRESHOLD: float = _metadata["threshold"]
 
 
-class CreditApplication(BaseModel):
+class CustomerRecord(BaseModel):
     LIMIT_BAL: int = Field(ge=0, le=10_000_000)
     SEX: int = Field(ge=1, le=2)
     EDUCATION: int = Field(ge=0, le=6)
@@ -56,8 +67,9 @@ class CreditApplication(BaseModel):
 
 
 def _init_db() -> None:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as con:
+    path = _db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as con:
         con.execute(
             """CREATE TABLE IF NOT EXISTS decisions (
                    id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,7 +89,7 @@ def _startup() -> None:
 
 def _log_decision(input_hash: str, probability: float, decision: int) -> None:
     _init_db()
-    with sqlite3.connect(DB_PATH) as con:
+    with sqlite3.connect(_db_path()) as con:
         con.execute(
             "INSERT INTO decisions (ts, input_hash, probability, threshold, decision)"
             " VALUES (?, ?, ?, ?, ?)",
@@ -92,8 +104,8 @@ def health() -> dict:
 
 
 @app.post("/predict")
-def predict(application: CreditApplication) -> dict:
-    raw = application.model_dump()
+def predict(record: CustomerRecord) -> dict:
+    raw = record.model_dump()
     vector = row_to_vector(raw)  # same preprocessing as training
     X = pd.DataFrame([vector], columns=FEATURE_COLUMNS)
     probability = float(_model.predict_proba(X)[0, 1])
@@ -104,5 +116,5 @@ def predict(application: CreditApplication) -> dict:
     return {
         "default_probability": round(probability, 4),
         "threshold": THRESHOLD,
-        "decision": decision,  # 1 = predicted default (reject / review), 0 = predicted no default
+        "decision": decision,  # 1 = predicted default (flag for review), 0 = no flag
     }

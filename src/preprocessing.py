@@ -1,6 +1,6 @@
-"""Shared preprocessing for the credit-default decision service.
+"""Shared preprocessing for the credit-default risk scoring service.
 
-Single source of truth for how a raw applicant record becomes a model input.
+Single source of truth for how a raw customer record becomes a model input.
 Used by: notebooks, src/train.py, src/app.py, tests/test_service.py.
 
 Cleaning decisions (documented):
@@ -40,7 +40,7 @@ def remap_codes(record: dict) -> dict:
 
 
 def row_to_vector(record: dict) -> list:
-    """Raw applicant record -> model input vector in FEATURE_COLUMNS order."""
+    """Raw customer record -> model input vector in FEATURE_COLUMNS order."""
     rec = remap_codes(record)
     return [rec[col] for col in FEATURE_COLUMNS]
 

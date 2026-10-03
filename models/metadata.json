@@ -1,5 +1,5 @@
 {
-  "model": "HistGradientBoostingClassifier(random_state=42)",
+  "model": "HistGradientBoostingClassifier(selected on validation, candidates: ['hgb', 'logreg'])",
   "features": [
     "LIMIT_BAL",
     "SEX",
@@ -25,14 +25,17 @@
     "PAY_AMT5",
     "PAY_AMT6"
   ],
-  "threshold": 0.3,
-  "threshold_cost_assumption": "cost = 5*FN + 1*FP (missed defaulter costs 5x a rejected good applicant); threshold minimizes this on the test set",
-  "operating_metrics_at_threshold": {
-    "accuracy": 0.7983,
-    "precision": 0.5459,
-    "recall": 0.5254,
-    "f1": 0.5354,
-    "roc_auc": 0.7768
+  "split": "stratified 60/20/20 train/validation/test, random_state=42",
+  "threshold": 0.15,
+  "threshold_selection": "grid 0.10-0.90 step 0.05, cost = 5*FN + 1*FP, minimized on the VALIDATION set only (selected cost 3,426); test set used once for final evaluation",
+  "threshold_cost_assumption": "cost = 5*FN + 1*FP (illustrative assumption: a missed defaulter costs 5x a false alarm on a good customer); not an observed business fact",
+  "test_metrics_at_frozen_threshold": {
+    "accuracy": 0.6328,
+    "precision": 0.3532,
+    "recall": 0.7943,
+    "f1": 0.489,
+    "roc_auc": 0.7858,
+    "baseline_accuracy": 0.7788
   },
-  "data": "UCI default of credit card clients (Taiwan); 30000 rows; no timestamps (no out-of-time evaluation)"
+  "data": "UCI default of credit card clients (Taiwan); 30000 rows; existing card customers with 6 months of history; no timestamps (no out-of-time evaluation)"
 }
