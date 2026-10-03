@@ -33,7 +33,7 @@ Model comparison on the validation set (0.5 threshold):
 | Logistic Regression (scaled pipeline) | 0.8028 | 0.7030 |
 | HistGradientBoosting | 0.8135 | 0.7719 |
 
-HistGradientBoosting wins and is the final model. Frozen model + frozen threshold, evaluated once on the test set (n = 6,000):
+HistGradientBoosting also achieves the lowest validation cost after threshold tuning and is selected as the final model. Frozen model + frozen threshold, evaluated once on the test set (n = 6,000):
 
 | Metric | Value |
 |---|---|
@@ -44,7 +44,9 @@ HistGradientBoosting wins and is the final model. Frozen model + frozen threshol
 | ROC-AUC | 0.7858 |
 | Majority-class baseline accuracy | 0.7788 |
 
-Note: accuracy at the operating point (0.63) is *below* the majority baseline (0.78). That is the direct consequence of the cost assumption below — the 5:1 ratio prioritizes catching defaulters (recall 0.79) over avoiding false alarms (precision 0.35). The model still separates the classes (ROC-AUC 0.79); the threshold is optimal for the stated cost, not for accuracy.
+Note: accuracy at the operating point (0.63) is *below* the majority baseline (0.78). That is the direct consequence of the cost assumption below — the 5:1 ratio prioritizes catching defaulters (recall 0.79) over avoiding false alarms (precision 0.35). The model still separates the classes (ROC-AUC 0.79); the threshold minimizes validation cost among the searched candidates rather than maximizing accuracy.
+
+On the held-out test set, the model incurs an illustrative cost of **3,295** (`5 × 273 false negatives + 1,930 false positives`). Predicting no default for everyone incurs **6,635** (`5 × 1,327 false negatives`), so the model reduces this assumed cost by **50.3%**. These are cost units under the stated assumption, not dollars or realized savings.
 
 ### Calibration evaluation
 
@@ -69,7 +71,7 @@ The 0.5 default is arbitrary. **Illustrative cost assumption** (a modeling choic
 
 ### What the data shows (associations, not causes)
 
-Repayment status dominates: customers 2+ months behind on the most recent bill default at 69–76% (vs. 13–17% for those current or revolving). Lower credit limits and younger age are weakly associated with default. Past repayment behavior is the most informative signal available at decision time — expected, not a discovery.
+Customers two and three months behind on the most recent bill have observed default rates of **69.1% (n = 2,667)** and **75.8% (n = 322)**, respectively. Customers with no consumption, paid-duly status, or revolving credit show rates of approximately 13–17%. Longer-delay groups are much smaller and do not all fall in the 69–76% range. Lower credit limits have a modest negative correlation with default; age has a near-zero Pearson correlation (+0.014), which does not establish an age-risk pattern. These descriptive associations do not establish causation.
 
 ## The API
 
