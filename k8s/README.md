@@ -3,6 +3,20 @@
 Use the [PowerShell instructions](#windows-docker-desktop-and-powershell) on
 Windows. The first sections below use a POSIX shell.
 
+## Verify Kubernetes in GitHub Actions
+
+The **Kubernetes integration** workflow runs on pushes to
+`feature/rust-runtime-gateway`. Open its run in the repository's Actions tab
+to verify Kubernetes without installing any tools locally. It builds the
+existing images, loads them into a temporary single-node kind cluster on an
+Ubuntu runner, and applies these same manifests without an overlay. It checks
+Pod readiness, Service DNS, PVC access, gateway HTTP responses, and the same
+SQLite audit row after a FastAPI Pod replacement.
+
+On failure, open the job output and the `kind-diagnostics` artifact for Pod
+logs, events, and cluster diagnostics. The job deletes its cluster on success
+or failure. Its SQLite data lives only inside that disposable cluster.
+
 Run the commands from the repository root. Use Docker, Minikube, and
 `kubectl` against a dedicated profile named `credit-default`. The commands below
 use Kubernetes 1.34.0. On rootless Docker, Minikube's Docker driver also needs

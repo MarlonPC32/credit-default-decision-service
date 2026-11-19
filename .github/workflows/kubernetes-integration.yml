@@ -1,0 +1,104 @@
+name: Kubernetes integration
+
+on:
+  push:
+    branches: [feature/rust-runtime-gateway]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kind:
+    name: Test FastAPI and Rust in kind
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    env:
+      KIND_CLUSTER: credit-default-ci
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install pinned kind and kubectl
+        run: |
+          tools="$RUNNER_TEMP/kubernetes-tools"
+          mkdir -p "$tools"
+          cd "$tools"
+          curl --fail --silent --show-error --location --retry 3 --output kind \
+            https://github.com/kubernetes-sigs/kind/releases/download/v0.31.0/kind-linux-amd64
+          curl --fail --silent --show-error --location --retry 3 --output kubectl \
+            https://dl.k8s.io/release/v1.34.3/bin/linux/amd64/kubectl
+          sha256sum --check <<'SUMS'
+          eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa  kind
+          ab60ca5f0fd60c1eb81b52909e67060e3ba0bd27e55a8ac147cbc2172ff14212  kubectl
+          SUMS
+          chmod +x kind kubectl
+          echo "$tools" >> "$GITHUB_PATH"
+          echo "KUBECONFIG=$RUNNER_TEMP/credit-default-kind.kubeconfig" >> "$GITHUB_ENV"
+
+      - name: Build project images
+        run: |
+          docker build --tag credit-default-fastapi:m4 .
+          docker build --tag credit-default-gateway:m4 ./rust-runtime
+
+      - name: Create cluster and load project images
+        run: |
+          kind create cluster --name "$KIND_CLUSTER" --retain --wait 120s \
+            --image kindest/node:v1.34.3@sha256:08497ee19eace7b4b5348db5c6a1591d7752b164530a36f855cb0f2bdcbadd48
+          kind load docker-image --name "$KIND_CLUSTER" credit-default-fastapi:m4 credit-default-gateway:m4
+
+      - name: Validate and deploy manifests
+        run: |
+          kubectl --context "kind-$KIND_CLUSTER" apply -f k8s/namespace.yaml
+          kubectl --context "kind-$KIND_CLUSTER" apply --dry-run=server --validate=strict \
+            -f k8s/fastapi.yaml -f k8s/gateway.yaml
+          kubectl --context "kind-$KIND_CLUSTER" apply -f k8s/fastapi.yaml -f k8s/gateway.yaml
+          kubectl --context "kind-$KIND_CLUSTER" -n credit-default rollout status deployment/fastapi --timeout=180s
+          kubectl --context "kind-$KIND_CLUSTER" -n credit-default rollout status deployment/gateway --timeout=180s
+          kubectl --context "kind-$KIND_CLUSTER" -n credit-default wait \
+            --for=condition=Ready pod -l 'app in (fastapi,gateway)' --timeout=60s
+
+      - name: Verify DNS, HTTP and SQLite persistence
+        run: python3 k8s/verify-kind.py "kind-$KIND_CLUSTER"
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          diagnostics="$RUNNER_TEMP/kind-diagnostics"
+          mkdir -p "$diagnostics"
+          (
+            kubectl --context "kind-$KIND_CLUSTER" --request-timeout=15s -n credit-default \
+              get pods,services,endpointslices,pvc -o wide
+            kubectl --context "kind-$KIND_CLUSTER" --request-timeout=15s -n credit-default \
+              describe pods,pvc
+            kubectl --context "kind-$KIND_CLUSTER" --request-timeout=15s -n credit-default \
+              get events --sort-by=.metadata.creationTimestamp
+            for app in fastapi gateway; do
+              kubectl --context "kind-$KIND_CLUSTER" --request-timeout=15s -n credit-default \
+                logs -l "app=$app" --tail=100 --prefix
+              kubectl --context "kind-$KIND_CLUSTER" --request-timeout=15s -n credit-default \
+                logs -l "app=$app" --previous --tail=100 --prefix
+            done
+          ) > "$diagnostics/workloads.log" 2>&1
+          cat "$diagnostics/workloads.log"
+          kind export logs --name "$KIND_CLUSTER" "$diagnostics/cluster" || true
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kind-diagnostics
+          path: ${{ runner.temp }}/kind-diagnostics
+          retention-days: 3
+
+      - name: Delete temporary cluster
+        if: always()
+        run: |
+          if command -v kind >/dev/null; then
+            kind delete cluster --name "$KIND_CLUSTER"
+          fi
