@@ -89,6 +89,59 @@ uvicorn src.app:app --reload       # serves on http://127.0.0.1:8000
 
 `decision = 1` means predicted default → **flag for review**. Every call is logged to `data/decisions.db` (timestamp, SHA-256 of the input, probability, threshold, decision; override the location with the `DECISIONS_DB` environment variable). `GET /health` reports model and threshold.
 
+## Run both services with Docker Compose
+
+From the repository root, use Docker with the Compose plugin:
+
+```bash
+docker compose up --build --wait
+curl -fsS http://127.0.0.1:8080/health
+curl -i -H 'Content-Type: application/json' --data '{}' http://127.0.0.1:8080/predict
+```
+
+The first request reports the model and threshold. The empty prediction returns
+HTTP 422 with FastAPI's validation details. Send a JSON object with all 23
+features to the same gateway URL to get a prediction.
+
+The gateway publishes port 8080 on the host's loopback interface. Inside Compose
+it resolves `fastapi` through Docker DNS and sends requests to
+`http://fastapi:8000` over the internal backend network. FastAPI has no host
+port mapping. Compose waits for FastAPI's health check before starting the
+gateway, whose own health check goes through to FastAPI.
+
+Both containers run as a non-root user. FastAPI stores SQLite records in the
+`decisions-data` named volume. `docker compose down` stops the services and
+keeps that volume. For an isolated test, use a separate project name, such as
+`docker compose -p credit-default-test up --build --wait`. After testing,
+`docker compose -p credit-default-test down -v` removes that test project's
+database volume.
+
+The images pin their base image digests and dependency versions. On networks
+where the package registries use publicly trusted TLS certificates, the
+standard Compose command above uses the base images' normal trust stores.
+
+The Codex cloud build network uses an HTTPS proxy whose CA is missing from
+the base images. If dependency downloads fail with a certificate trust error,
+save this override outside the checkout as `compose.cloud.yaml`:
+
+```yaml
+services:
+  fastapi:
+    build:
+      secrets: [build_ca]
+  gateway:
+    build:
+      secrets: [build_ca]
+secrets:
+  build_ca:
+    file: /etc/ssl/certs/ca-certificates.crt
+```
+
+Then run `docker compose -f compose.yaml -f /path/to/compose.cloud.yaml up --build --wait`.
+On other TLS-inspecting networks, use their approved CA bundle path. The
+bundle is mounted only during dependency downloads, and TLS verification
+remains enabled.
+
 ## Tests
 
 ```bash

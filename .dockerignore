@@ -1,0 +1,9 @@
+**
+!Dockerfile
+!requirements.txt
+!requirements-docker.lock
+!src/
+!src/*.py
+!models/
+!models/model.joblib
+!models/metadata.json

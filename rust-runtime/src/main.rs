@@ -133,10 +133,21 @@ fn gateway_error(status: StatusCode, operation: &str, reason: &str) -> Response 
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    if env::args().nth(1).as_deref() == Some("--healthcheck") {
+        let upstream = Upstream::new("http://127.0.0.1:8080")?;
+        let response = upstream.client.get(upstream.health_url).send().await?;
+        return if response.status() == StatusCode::OK {
+            Ok(())
+        } else {
+            Err(format!("Gateway health check returned {}", response.status()).into())
+        };
+    }
+
     let base_url =
         env::var("FASTAPI_BASE_URL").map_err(|_| "Set FASTAPI_BASE_URL to the FastAPI base URL")?;
     let app = gateway(Upstream::new(&base_url)?);
-    let listener = TcpListener::bind("127.0.0.1:8080").await?;
+    let bind_address = env::var("GATEWAY_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
+    let listener = TcpListener::bind(bind_address).await?;
     println!("Rust gateway listening on {}", listener.local_addr()?);
     axum::serve(listener, app).await?;
     Ok(())

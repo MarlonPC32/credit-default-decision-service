@@ -1,0 +1,47 @@
+services:
+  fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DECISIONS_DB: /var/lib/credit-default/decisions.db
+      OMP_NUM_THREADS: "2"
+    volumes:
+      - decisions-data:/var/lib/credit-default
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).close()"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  gateway:
+    build:
+      context: ./rust-runtime
+    environment:
+      FASTAPI_BASE_URL: http://fastapi:8000
+      GATEWAY_BIND_ADDR: 0.0.0.0:8080
+    depends_on:
+      fastapi:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks:
+      - backend
+      - frontend
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/credit-default-gateway", "--healthcheck"]
+      interval: 10s
+      timeout: 7s
+      start_period: 5s
+      retries: 3
+
+networks:
+  backend:
+    internal: true
+  frontend:
+
+volumes:
+  decisions-data:
