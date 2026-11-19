@@ -1,0 +1,171 @@
+{
+  "uid": "credit-service",
+  "title": "Credit Default Decision Service",
+  "tags": [
+    "credit-default"
+  ],
+  "schemaVersion": 40,
+  "version": 1,
+  "refresh": "10s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Prediction throughput",
+      "description": "Both services count the requests they receive. Read the lines separately.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "credit-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (job) (rate(credit_http_requests_total{route=\"/predict\"}[2m]))",
+          "legendFormat": "{{job}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Prediction HTTP errors",
+      "description": "4xx includes validation failures. 5xx indicates service or gateway failures.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "credit-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (job, status) (rate(credit_http_requests_total{route=\"/predict\",status=~\"[45]..\"}[2m]))",
+          "legendFormat": "{{job}} HTTP {{status}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Prediction latency p95",
+      "description": "Gateway latency includes the FastAPI round trip. FastAPI latency measures its own request handling.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "credit-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (job, le) (rate(credit_http_request_duration_seconds_bucket{route=\"/predict\"}[2m])))",
+          "legendFormat": "{{job}} p95"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Availability",
+      "description": "Compare scrape reachability with the success rate of health calls proxied through the gateway.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "credit-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=~\"gateway|fastapi\"}",
+          "legendFormat": "{{job}} scrape"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(credit_http_requests_total{job=\"gateway\",route=\"/health\",status=\"200\"}[2m])) / sum(rate(credit_http_requests_total{job=\"gateway\",route=\"/health\"}[2m]))",
+          "legendFormat": "Gateway → FastAPI health"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Upstream failures and timeouts",
+      "description": "A timeout is one failure reason. Validation responses do not count as upstream failures.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "credit-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (route, reason) (rate(credit_gateway_upstream_failures_total[2m]))",
+          "legendFormat": "{{route}} {{reason}}"
+        }
+      ]
+    }
+  ]
+}

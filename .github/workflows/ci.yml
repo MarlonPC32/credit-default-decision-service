@@ -76,6 +76,8 @@ jobs:
     name: Docker images
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      COMPOSE_PROJECT_NAME: credit-observability-ci
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -84,3 +86,14 @@ jobs:
         run: docker compose config --quiet
       - name: Build both images
         run: docker compose build
+      - name: Verify the optional observability stack
+        run: |
+          docker compose -f compose.yaml -f compose.observability.yaml build prometheus grafana
+          docker compose -f compose.yaml -f compose.observability.yaml up --no-build --wait --wait-timeout 90
+          python3 observability/smoke.py
+      - name: Print service logs on failure
+        if: failure()
+        run: docker compose -f compose.yaml -f compose.observability.yaml logs --tail 80
+      - name: Clean up the observability stack
+        if: always()
+        run: docker compose -f compose.yaml -f compose.observability.yaml down -v

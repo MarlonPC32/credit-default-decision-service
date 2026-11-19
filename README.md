@@ -78,7 +78,7 @@ Customers two and three months behind on the most recent bill have observed defa
 ```bash
 pip install -r requirements.txt
 python -m src.train                # build models/model.joblib + models/metadata.json
-uvicorn src.app:app --reload       # serves on http://127.0.0.1:8000
+uvicorn src.app:app --reload --no-access-log
 ```
 
 `POST /predict` accepts the 23 features (validated with pydantic; missing or out-of-range fields return 422) and returns:
@@ -142,6 +142,50 @@ On other TLS-inspecting networks, use their approved CA bundle path. The
 bundle is mounted only during dependency downloads, and TLS verification
 remains enabled.
 
+## Optional Prometheus and Grafana
+
+Both services emit JSON request logs and expose Prometheus metrics at
+`/metrics`. Logs record the service, HTTP method, normalized route, status,
+and duration. The gateway also logs a bounded reason for each upstream
+failure. Application telemetry omits request bodies, query strings, headers,
+customer identifiers, and SQLite audit hashes. Paths outside `/health` and
+`/predict` are grouped as `other`. Successful health probes contribute to
+metrics and are omitted from the request logs.
+
+Enable both tools with the optional Compose file.
+
+```bash
+docker compose -f compose.yaml -f compose.observability.yaml up --build --wait
+curl -fsS http://127.0.0.1:8080/health
+curl -i -H 'Content-Type: application/json' --data '{}' http://127.0.0.1:8080/predict
+curl -fsS http://127.0.0.1:8080/metrics
+docker compose -f compose.yaml -f compose.observability.yaml logs --tail 50 gateway fastapi
+```
+
+Open Grafana at `http://127.0.0.1:3000/d/credit-service` and Prometheus at
+`http://127.0.0.1:9090/targets`. Both UIs bind to loopback, and Grafana
+grants local anonymous viewer access. Normal `docker compose up --build --wait`
+runs the application by itself.
+
+The dashboard charts prediction throughput, 4xx and 5xx rates, p95 latency,
+scrape reachability, and the success rate of health requests through the
+gateway. The last panel splits upstream failures by reason, including
+`timeout`. Send several requests over at least two scrape intervals to see
+rates. For a successful prediction, send the sample customer JSON from the
+Kubernetes runbook. Each successful prediction still writes one audit row.
+
+Use a fresh Compose project for the smoke test. The script expects fresh
+counters and drives a single 422 response. Remove the disposable project
+afterward. For the regular stack, use `down` without `-v` to keep data.
+Prometheus history is retained for seven days with this overlay.
+
+```bash
+export COMPOSE_PROJECT_NAME=credit-observability-demo
+docker compose -f compose.yaml -f compose.observability.yaml up --build --wait
+python3 observability/smoke.py
+docker compose -f compose.yaml -f compose.observability.yaml down -v
+```
+
 ## Build the Rust gateway with Bazel
 
 Bazel 8.5.0 is an additional build path for the Rust gateway on Linux x86-64.
@@ -165,8 +209,8 @@ access to fetch the rules, toolchain, and crates.
 GitHub Actions runs independent checks on pushes and pull requests:
 Rust formatting, tests, and a locked build; a Bazel build and test run for the
 same Rust gateway; Python tests with pinned dependencies; and builds of both
-Docker Compose images. The workflow uses a
-read-only repository token and does not deploy or publish images. Python CI
+Docker Compose images followed by an observability smoke test. The workflow
+uses a read-only repository token and does not deploy or publish images. Python CI
 uses the checked-in model and skips the optional raw-spreadsheet test.
 
 To run the check commands locally, use Rust 1.91.1 and Python 3.12.14:

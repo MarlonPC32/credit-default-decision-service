@@ -16,7 +16,7 @@ a decision by the time a client receives a timeout.
 From the repository root, start FastAPI with the project's Python environment active:
 
 ```sh
-python -m uvicorn src.app:app --host 127.0.0.1 --port 8000
+python -m uvicorn src.app:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
 The Python environment needs the dependencies in `requirements.txt`. If using the

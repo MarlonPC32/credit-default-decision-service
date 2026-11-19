@@ -8,7 +8,7 @@ override with the DECISIONS_DB environment variable): timestamp, SHA-256 of
 the canonical input, probability, threshold, decision.
 
 Run from the project root:
-    uvicorn src.app:app --reload
+    uvicorn src.app:app --reload --no-access-log
 """
 import hashlib
 import json
@@ -23,6 +23,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
 from .preprocessing import FEATURE_COLUMNS, row_to_vector
+from .telemetry import HttpTelemetry, metrics
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -34,6 +35,8 @@ def _db_path() -> Path:
 
 
 app = FastAPI(title="Credit Default Risk Scoring Service")
+app.add_middleware(HttpTelemetry)
+app.add_api_route("/metrics", metrics, methods=["GET"], include_in_schema=False)
 
 _model = joblib.load(ROOT / "models" / "model.joblib")
 _metadata = json.loads((ROOT / "models" / "metadata.json").read_text())

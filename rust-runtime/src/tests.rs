@@ -41,6 +41,22 @@ async fn send_prediction(gateway_url: &str, body: impl Into<reqwest::Body>) -> r
         .unwrap()
 }
 
+async fn scrape_metrics(gateway_url: &str) -> String {
+    let response = test_client()
+        .get(format!("{gateway_url}/metrics"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain")
+    );
+    response.text().await.unwrap()
+}
+
 #[tokio::test]
 async fn relays_the_upstream_health_response() {
     const UPSTREAM_BODY: &str = r#"{"status":"ok","model":"test model","threshold":0.15}"#;
@@ -164,6 +180,9 @@ async fn prediction_returns_bad_gateway_on_connection_failure() {
     let response = send_prediction(&gateway_url, "{}").await;
 
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(scrape_metrics(&gateway_url).await.contains(
+        r#"credit_gateway_upstream_failures_total{reason="connect",route="/predict"} 1"#
+    ));
 }
 
 #[tokio::test]
@@ -200,4 +219,51 @@ async fn prediction_returns_gateway_timeout_after_one_upstream_request() {
 
     assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
     assert_eq!(upstream_calls.load(Ordering::SeqCst), 1);
+    let metrics = scrape_metrics(&gateway_url).await;
+    assert!(metrics.contains(
+        r#"credit_gateway_upstream_failures_total{reason="timeout",route="/predict"} 1"#
+    ));
+    assert!(
+        metrics.contains(
+            r#"credit_http_requests_total{method="POST",route="/predict",status="504"} 1"#
+        )
+    );
+}
+
+#[tokio::test]
+async fn metrics_count_validation_latency_and_normalize_unknown_paths() {
+    let upstream = Router::new().route(
+        "/predict",
+        post(|| async { StatusCode::UNPROCESSABLE_ENTITY }),
+    );
+    let gateway_url = serve(gateway(Upstream::new(&serve(upstream).await).unwrap())).await;
+    assert_eq!(
+        send_prediction(&gateway_url, "private-body").await.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        test_client()
+            .get(format!("{gateway_url}/private-path?token=private-query"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND,
+    );
+    let metrics = scrape_metrics(&gateway_url).await;
+    assert!(
+        metrics.contains(
+            r#"credit_http_requests_total{method="POST",route="/predict",status="422"} 1"#
+        )
+    );
+    assert!(metrics.contains(
+        r#"credit_http_request_duration_seconds_count{method="POST",route="/predict"} 1"#
+    ));
+    assert!(
+        metrics
+            .contains(r#"credit_http_requests_total{method="GET",route="other",status="404"} 1"#)
+    );
+    assert!(!metrics.contains("private-"));
+    assert!(!metrics.contains("credit_gateway_upstream_failures_total"));
+    assert_eq!(metrics, scrape_metrics(&gateway_url).await);
 }

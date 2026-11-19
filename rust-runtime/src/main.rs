@@ -1,15 +1,19 @@
-use std::{collections::HashMap, env, error::Error, time::Duration};
+use std::{collections::HashMap, env, error::Error, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
     body::Bytes,
     extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode, header},
+    middleware,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use reqwest::{Client, RequestBuilder, Url};
 use tokio::net::TcpListener;
+
+mod telemetry;
+use telemetry::Telemetry;
 
 const MAX_PREDICT_BODY_BYTES: usize = 64 * 1024;
 
@@ -18,6 +22,7 @@ struct Upstream {
     client: Client,
     health_url: Url,
     predict_url: Url,
+    telemetry: Arc<Telemetry>,
 }
 
 impl Upstream {
@@ -50,25 +55,58 @@ impl Upstream {
             client,
             health_url: base_url.join("health")?,
             predict_url: base_url.join("predict")?,
+            telemetry: Arc::new(Telemetry::new()?),
         })
     }
 }
 
 fn gateway(upstream: Upstream) -> Router {
+    let telemetry = Arc::clone(&upstream.telemetry);
     Router::new()
         .route("/health", get(health))
+        .route("/metrics", get(metrics))
         .route(
             "/predict",
             post(predict).layer(DefaultBodyLimit::max(MAX_PREDICT_BODY_BYTES)),
         )
+        .layer(middleware::from_fn_with_state(
+            telemetry,
+            telemetry::record_http,
+        ))
         .with_state(upstream)
+}
+
+async fn metrics(State(upstream): State<Upstream>) -> Response {
+    upstream.telemetry.metrics()
+}
+
+#[derive(Clone, Copy)]
+enum Operation {
+    Health,
+    Prediction,
+}
+
+impl Operation {
+    fn route(self) -> &'static str {
+        match self {
+            Self::Health => "/health",
+            Self::Prediction => "/predict",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Health => "health check",
+            Self::Prediction => "prediction",
+        }
+    }
 }
 
 async fn health(State(upstream): State<Upstream>) -> Response {
     relay(
         upstream.client.get(upstream.health_url),
-        &[StatusCode::OK],
-        "health check",
+        &upstream.telemetry,
+        Operation::Health,
     )
     .await
 }
@@ -78,30 +116,30 @@ async fn predict(State(upstream): State<Upstream>, headers: HeaderMap, body: Byt
     if let Some(content_type) = headers.get(header::CONTENT_TYPE) {
         request = request.header(header::CONTENT_TYPE, content_type);
     }
-    relay(
-        request,
-        &[StatusCode::OK, StatusCode::UNPROCESSABLE_ENTITY],
-        "prediction",
-    )
-    .await
+    relay(request, &upstream.telemetry, Operation::Prediction).await
 }
 
-async fn relay(
-    request: RequestBuilder,
-    accepted_statuses: &[StatusCode],
-    operation: &str,
-) -> Response {
+async fn relay(request: RequestBuilder, telemetry: &Telemetry, operation: Operation) -> Response {
     let response = match request.send().await {
-        Ok(response) if accepted_statuses.contains(&response.status()) => response,
-        Ok(_) => return gateway_error(StatusCode::BAD_GATEWAY, operation, "failed"),
-        Err(error) => return upstream_error(error, operation),
+        Ok(response)
+            if response.status() == StatusCode::OK
+                || (matches!(operation, Operation::Prediction)
+                    && response.status() == StatusCode::UNPROCESSABLE_ENTITY) =>
+        {
+            response
+        }
+        Ok(_) => {
+            telemetry.upstream_failure(operation.route(), "unexpected_status");
+            return gateway_error(StatusCode::BAD_GATEWAY, operation.description(), "failed");
+        }
+        Err(error) => return upstream_error(error, telemetry, operation),
     };
 
     let status = response.status();
     let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
     let body = match response.bytes().await {
         Ok(body) => body,
-        Err(error) => return upstream_error(error, operation),
+        Err(error) => return upstream_error(error, telemetry, operation),
     };
 
     let mut response = (status, body).into_response();
@@ -113,11 +151,23 @@ async fn relay(
     response
 }
 
-fn upstream_error(error: reqwest::Error, operation: &str) -> Response {
+fn upstream_error(error: reqwest::Error, telemetry: &Telemetry, operation: Operation) -> Response {
+    let reason = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else {
+        "transport"
+    };
+    telemetry.upstream_failure(operation.route(), reason);
     if error.is_timeout() && !error.is_connect() {
-        return gateway_error(StatusCode::GATEWAY_TIMEOUT, operation, "timed out");
+        return gateway_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            operation.description(),
+            "timed out",
+        );
     }
-    gateway_error(StatusCode::BAD_GATEWAY, operation, "failed")
+    gateway_error(StatusCode::BAD_GATEWAY, operation.description(), "failed")
 }
 
 fn gateway_error(status: StatusCode, operation: &str, reason: &str) -> Response {
@@ -143,12 +193,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         };
     }
 
+    tracing_subscriber::fmt()
+        .json()
+        .with_max_level(tracing::Level::INFO)
+        .init();
     let base_url =
         env::var("FASTAPI_BASE_URL").map_err(|_| "Set FASTAPI_BASE_URL to the FastAPI base URL")?;
     let app = gateway(Upstream::new(&base_url)?);
     let bind_address = env::var("GATEWAY_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let listener = TcpListener::bind(bind_address).await?;
-    println!("Rust gateway listening on {}", listener.local_addr()?);
+    tracing::info!(event = "listening", service = "gateway", address = %listener.local_addr()?);
     axum::serve(listener, app).await?;
     Ok(())
 }
