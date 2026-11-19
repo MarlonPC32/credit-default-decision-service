@@ -142,6 +142,29 @@ On other TLS-inspecting networks, use their approved CA bundle path. The
 bundle is mounted only during dependency downloads, and TLS verification
 remains enabled.
 
+## Continuous integration
+
+GitHub Actions runs three independent checks on pushes and pull requests:
+Rust formatting, tests, and a locked build; Python tests with pinned
+dependencies; and builds of both Docker Compose images. The workflow uses a
+read-only repository token and does not deploy or publish images. Python CI
+uses the checked-in model and skips the optional raw-spreadsheet test.
+
+To run the check commands locally, use Rust 1.91.1 and Python 3.12.14:
+
+```bash
+(cd rust-runtime && cargo fmt --check && cargo test --locked && cargo build --locked)
+python -m pip install --only-binary=:all: -r requirements.txt -c requirements-docker.lock
+python -m pip check
+OMP_NUM_THREADS=2 python -m pytest tests/ -q -rs
+docker compose config --quiet
+docker compose build
+```
+
+The Actions tab shows hosted-runner results. Local commands check the same
+build and test steps. Workflow triggering, hosted tool setup, and clean runner
+image builds are verified by the GitHub Actions run.
+
 ## Tests
 
 ```bash
