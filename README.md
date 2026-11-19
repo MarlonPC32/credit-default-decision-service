@@ -142,11 +142,30 @@ On other TLS-inspecting networks, use their approved CA bundle path. The
 bundle is mounted only during dependency downloads, and TLS verification
 remains enabled.
 
+## Build the Rust gateway with Bazel
+
+Bazel 8.5.0 is an additional build path for the Rust gateway on Linux x86-64.
+Bzlmod pins the build rules, and `rules_rust` reads the existing Cargo manifest
+and lockfile for crate versions and features. It uses Rust 1.91.1, matching the
+Docker build and Cargo CI. Cargo and Python remain supported, and the Docker
+images continue to use the existing Cargo and pip builds.
+
+```bash
+bazel build --lockfile_mode=error //rust-runtime:credit-default-gateway
+bazel test --lockfile_mode=error --test_output=errors //rust-runtime:gateway_test
+```
+
+After changing Cargo dependencies, update `Cargo.lock` with Cargo, run the
+Bazel commands without `--lockfile_mode=error` to refresh `MODULE.bazel.lock`
+if needed, and review both lockfiles. The first Bazel build needs network
+access to fetch the rules, toolchain, and crates.
+
 ## Continuous integration
 
-GitHub Actions runs three independent checks on pushes and pull requests:
-Rust formatting, tests, and a locked build; Python tests with pinned
-dependencies; and builds of both Docker Compose images. The workflow uses a
+GitHub Actions runs independent checks on pushes and pull requests:
+Rust formatting, tests, and a locked build; a Bazel build and test run for the
+same Rust gateway; Python tests with pinned dependencies; and builds of both
+Docker Compose images. The workflow uses a
 read-only repository token and does not deploy or publish images. Python CI
 uses the checked-in model and skips the optional raw-spreadsheet test.
 

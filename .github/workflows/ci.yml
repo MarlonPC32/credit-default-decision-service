@@ -8,6 +8,28 @@ permissions:
   contents: read
 
 jobs:
+  bazel:
+    name: Bazel Rust build and tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Install pinned Bazel
+        run: |
+          version="$(cat .bazelversion)"
+          cd "$RUNNER_TEMP"
+          curl --fail --silent --show-error --location --retry 3 --output bazel \
+            "https://releases.bazel.build/$version/release/bazel-$version-linux-x86_64"
+          echo '18255229d933b8da10151bdef223a302744296b09af8af1988c93faa1ea3c71f  bazel' | sha256sum --check
+          chmod +x bazel
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Build gateway
+        run: bazel build --lockfile_mode=error //rust-runtime:credit-default-gateway
+      - name: Run gateway tests
+        run: bazel test --lockfile_mode=error --test_output=errors //rust-runtime:gateway_test
+
   rust:
     name: Rust
     runs-on: ubuntu-24.04
