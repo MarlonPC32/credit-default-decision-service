@@ -3,11 +3,14 @@
 The Rust gateway listens on `127.0.0.1:8080` and forwards `GET /health` and
 `POST /predict` to FastAPI. FastAPI owns validation, scoring, and SQLite audit
 logging. Rust forwards prediction request bytes and their content type, and
-relays FastAPI's HTTP 200 and 422 prediction responses with their original bodies.
+relays FastAPI's HTTP 200, 400, and 422 prediction responses with their original
+bodies. FastAPI returns 400 when it cannot decode the request body and 422 for
+invalid JSON or fields.
 
 Prediction bodies larger than 64 KiB receive HTTP 413 before FastAPI is called.
 The gateway returns HTTP 502 for connection failures or unexpected upstream
-statuses, and HTTP 504 when the upstream response exceeds the five-second deadline.
+statuses, and HTTP 504 when a non-connection upstream request exceeds its
+five-second deadline. Connection errors remain HTTP 502.
 The HTTP client disables retries and redirects. FastAPI may already have logged
 a decision by the time a client receives a timeout.
 

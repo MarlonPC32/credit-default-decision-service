@@ -81,7 +81,9 @@ def main(context):
             opener = build_opener(ProxyHandler({}))
 
             def call(path, payload=None):
-                data = json.dumps(payload).encode() if payload is not None else None
+                data = payload
+                if payload is not None and not isinstance(payload, bytes):
+                    data = json.dumps(payload).encode()
                 request = Request(
                     f"http://127.0.0.1:{port}{path}", data=data,
                     headers={"Content-Type": "application/json"} if data is not None else {},
@@ -99,6 +101,10 @@ def main(context):
             assert status == 200 and health["status"] == "ok" and health["threshold"] == 0.15, health
             status, invalid = call("/predict", {})
             assert status == 422 and len(invalid["detail"]) == 23, invalid
+            status, overflow = call("/predict", b'{"LIMIT_BAL":1e400}')
+            assert status == 422 and overflow["detail"][0]["input"] is None, overflow
+            status, malformed = call("/predict", b'{"LIMIT_BAL":"\xff"}')
+            assert status == 400 and malformed["detail"] == "There was an error parsing the body", malformed
             assert audit_rows() == [], "Validation failure wrote an audit row"
             status, prediction = call("/predict", CUSTOMER)
             assert status == 200 and prediction == EXPECTED_PREDICTION, prediction
@@ -107,7 +113,7 @@ def main(context):
             _, _, input_hash, probability, threshold, decision = rows[0]
             assert input_hash == hashlib.sha256(json.dumps(CUSTOMER, sort_keys=True).encode()).hexdigest()
             assert (round(probability, 4), threshold, decision) == (0.3174, 0.15, 1)
-            print("Gateway returned 200 for health and prediction, and 422 for invalid input.")
+            print("Gateway returned 200 for health and prediction, 422 for invalid data, and 400 for invalid UTF-8.")
             print("Invalid input wrote no rows. One valid prediction wrote exactly one matching audit row.")
         finally:
             if forward.poll() is None:

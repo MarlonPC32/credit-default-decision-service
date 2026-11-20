@@ -12,6 +12,7 @@ Run from the project root:
 """
 import hashlib
 import json
+import math
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -19,7 +20,10 @@ from pathlib import Path
 
 import joblib
 import pandas as pd
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .preprocessing import FEATURE_COLUMNS, row_to_vector
@@ -37,6 +41,16 @@ def _db_path() -> Path:
 app = FastAPI(title="Credit Default Risk Scoring Service")
 app.add_middleware(HttpTelemetry)
 app.add_api_route("/metrics", metrics, methods=["GET"], include_in_schema=False)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    # JSON numbers such as 1e400 can decode to infinity before validation.
+    detail = jsonable_encoder(
+        exc.errors(), custom_encoder={float: lambda value: value if math.isfinite(value) else None},
+    )
+    return JSONResponse(status_code=422, content={"detail": detail})
+
 
 _model = joblib.load(ROOT / "models" / "model.joblib")
 _metadata = json.loads((ROOT / "models" / "metadata.json").read_text())

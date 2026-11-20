@@ -148,6 +148,33 @@ async fn relays_fastapi_validation_status_and_body() {
 }
 
 #[tokio::test]
+async fn relays_fastapi_bad_request_as_a_client_error() {
+    const DETAIL: &str = r#"{"detail":"There was an error parsing the body"}"#;
+    let upstream = Router::new().route(
+        "/predict",
+        post(|| async {
+            (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "application/json")],
+                DETAIL,
+            )
+        }),
+    );
+    let gateway_url = serve(gateway(Upstream::new(&serve(upstream).await).unwrap())).await;
+
+    let response = send_prediction(&gateway_url, b"{\"LIMIT_BAL\":\"\xff\"}".as_slice()).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+    assert_eq!(response.text().await.unwrap(), DETAIL);
+    assert!(
+        !scrape_metrics(&gateway_url)
+            .await
+            .contains("credit_gateway_upstream_failures_total")
+    );
+}
+
+#[tokio::test]
 async fn forwards_at_the_limit_and_rejects_larger_bodies_before_contacting_upstream() {
     let upstream_calls = Arc::new(AtomicUsize::new(0));
     let calls = Arc::clone(&upstream_calls);

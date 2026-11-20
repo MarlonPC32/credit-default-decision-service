@@ -6,6 +6,7 @@ Run from the project root:
 Unit tests need no downloads. The full-data integration test runs only when
 data/default_of_credit_card_clients.xls is present (otherwise it skips).
 """
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -127,6 +128,16 @@ def test_predict_rejects_invalid_values():
     bad2 = dict(VALID_CUSTOMER, AGE="thirty")  # wrong type
     r2 = client.post("/predict", json=bad2)
     assert r2.status_code == 422
+
+
+def test_predict_rejects_json_number_overflow_without_writing_audit_row():
+    payload = json.dumps(dict(VALID_CUSTOMER, LIMIT_BAL=float("inf"))).replace("Infinity", "1e400")
+    response = client.post("/predict", content=payload, headers={"Content-Type": "application/json"})
+    assert response.status_code == 422
+    error, = response.json()["detail"]
+    assert error["loc"] == ["body", "LIMIT_BAL"]
+    assert error["input"] is None
+    assert not Path(os.environ["DECISIONS_DB"]).exists()
 
 
 def test_artifacts_load_and_predict():

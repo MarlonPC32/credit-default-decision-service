@@ -124,7 +124,10 @@ async fn relay(request: RequestBuilder, telemetry: &Telemetry, operation: Operat
         Ok(response)
             if response.status() == StatusCode::OK
                 || (matches!(operation, Operation::Prediction)
-                    && response.status() == StatusCode::UNPROCESSABLE_ENTITY) =>
+                    && matches!(
+                        response.status(),
+                        StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+                    )) =>
         {
             response
         }

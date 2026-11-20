@@ -69,6 +69,11 @@ The 0.5 default is arbitrary. **Illustrative cost assumption** (a modeling choic
 
 (Full 17-point table in the notebook.) The cost curve is U-shaped with an interior minimum: HGB at **0.15** (cost 3,426), beating LogReg's best (0.25, cost 3,909). **Operating threshold: 0.15**, frozen before the single test evaluation. A different cost ratio would justify a different threshold; the selection method is the point. The 0.05 grid is coarse — a finer search could shift the optimum slightly.
 
+The initial artifact in commit `79c335e` used **0.30**. That experiment
+selected the threshold from three candidates using the same test split on
+which it reported performance. The current artifact uses the validation
+procedure above. In the current table, 0.30 is one candidate.
+
 ### What the data shows (associations, not causes)
 
 Customers two and three months behind on the most recent bill have observed default rates of **69.1% (n = 2,667)** and **75.8% (n = 322)**, respectively. Customers with no consumption, paid-duly status, or revolving credit show rates of approximately 13–17%. Longer-delay groups are much smaller and do not all fall in the 69–76% range. Lower credit limits have a modest negative correlation with default; age has a near-zero Pearson correlation (+0.014), which does not establish an age-risk pattern. These descriptive associations do not establish causation.
@@ -76,18 +81,25 @@ Customers two and three months behind on the most recent bill have observed defa
 ## The API
 
 ```bash
-pip install -r requirements.txt
-python -m src.train                # build models/model.joblib + models/metadata.json
-uvicorn src.app:app --reload --no-access-log
+python -m pip install -r requirements.txt -c requirements-docker.lock
+python -m uvicorn src.app:app --reload --no-access-log
 ```
 
 `POST /predict` accepts the 23 features (validated with pydantic; missing or out-of-range fields return 422) and returns:
 
 ```json
-{"default_probability": 0.3568, "threshold": 0.15, "decision": 1}
+{"default_probability": 0.3174, "threshold": 0.15, "decision": 1}
 ```
 
-`decision = 1` means predicted default → **flag for review**. Every call is logged to `data/decisions.db` (timestamp, SHA-256 of the input, probability, threshold, decision; override the location with the `DECISIONS_DB` environment variable). `GET /health` reports model and threshold.
+`decision = 1` means **flag for review**. FastAPI applies the threshold to the
+full-precision probability before rounding the displayed probability to four
+decimal places. A successful scoring operation writes a timestamp, input hash,
+full-precision probability, threshold, and decision to SQLite. Invalid inputs
+write no row. The database defaults to `data/decisions.db`; set `DECISIONS_DB`
+to use another path. `GET /health` reports the loaded model and threshold.
+
+The API uses the checked-in artifacts. Run `python -m src.train` only when
+intentionally regenerating them.
 
 ## Run both services with Docker Compose
 
@@ -234,13 +246,15 @@ image builds are verified by the GitHub Actions run.
 python -m pytest tests/ -q
 ```
 
-Unit tests require **no download**. 9 tests:
+The Python suite collects 11 tests. Ten run with the checked-in files, and the
+optional raw-spreadsheet test runs when the original UCI file is present.
 
 - train/serve preprocessing consistency on a synthetic fixture (raw record → identical feature vector both paths; undefined codes remapped)
 - integration test against the real `.xls` — **skipped** automatically when the file is absent (run `python scripts/download_data.py` to enable it)
 - `/predict` returns a valid probability and decision
 - `/predict` logs the decision to a **temporary** SQLite database (never the real `decisions.db`)
 - `/predict` rejects missing features and invalid values with 422
+- telemetry counts HTTP responses without logging customer inputs or query strings
 - saved artifacts load and predict
 - `src` imports work as a package (no `sys.path` hacks)
 
