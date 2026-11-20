@@ -1,0 +1,18 @@
+module(name = "credit_default_decision_service")
+
+bazel_dep(name = "rules_rust", version = "0.75.0")
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(edition = "2024", versions = ["1.91.1"])
+use_repo(rust, "rust_toolchains")
+register_toolchains("@rust_toolchains//:all")
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//rust-runtime:Cargo.lock",
+    manifests = ["//rust-runtime:Cargo.toml"],
+    skip_cargo_lockfile_overwrite = True,
+    supported_platform_triples = ["x86_64-unknown-linux-gnu"],
+)
+use_repo(crate, "crates")

@@ -1,135 +1,195 @@
 # Credit Default Decision Service
 
-End-to-end binary classification: predict whether an **existing** credit card customer will default next month, served through a small risk-scoring API that logs every scored customer to SQLite.
+A portfolio project that takes a trained credit-default model from a notebook to a testable service. A Rust gateway forwards requests to FastAPI, which estimates next-month default risk for an **existing** credit-card customer and records each successful score in SQLite.
 
-This is risk scoring for **review of current customers** — not an approval screen for new applicants. `decision = 1` means "flag for review", never "reject".
+The API returns a probability and a **review flag**. The checked-in model uses a threshold of **0.15**. The project has been exercised with local containers and a disposable Kubernetes cluster in GitHub Actions.
 
-## Data
+[Quick demo](#quick-demo) · [Architecture](#architecture) · [Verification](#verification) · [Model evaluation](#model-evaluation) · [Limitations](#limitations)
 
-- **UCI "Default of Credit Card Clients"** (Taiwan, 30,000 records). Download: `python scripts/download_data.py` (fetches the .xls from the UCI archive).
-- Target: `default.payment.next.month` (1 = default). Default rate: **22.12%** (6,636 of 30,000).
-- All 23 features describe information available **at decision time** for existing customers: credit limit (`LIMIT_BAL`), demographics (`SEX`, `EDUCATION`, `MARRIAGE`, `AGE`), repayment status for the last 6 months (`PAY_0`, `PAY_2`–`PAY_6`), bill amounts (`BILL_AMT1`–`6`), and payment amounts (`PAY_AMT1`–`6`).
-- All outcomes are resolved — no unknown or pending labels.
+## Quick demo
 
-### Cleaning
-
-- Renamed the target to `default`; dropped the `ID` column.
-- `EDUCATION` codes 0, 5, 6 (345 records, 1.2%) are undefined in the data dictionary → mapped to 4 ("others").
-- `MARRIAGE` code 0 (54 records, 0.2%) is undefined → mapped to 3 ("others").
-- No missing values. All decisions live in `src/preprocessing.py`, the single source of truth shared by the notebooks, training script, API, and tests.
-
-## Pipeline
-
-1. `notebooks/01_eda.ipynb` — target distribution, segment default rates (with denominators), feature distributions, correlations; exports `data/credit_default_clean.csv`.
-2. `notebooks/02_modeling.ipynb` — stratified 60/20/20 train/validation/test split (`random_state=42`); model and threshold selected on **validation** only, then frozen and evaluated **once** on the held-out test set. Includes a calibration evaluation with per-bin sample sizes.
-3. `src/train.py` — reproduces the final artifacts from the cleaned CSV (the API never depends on the notebooks).
-
-## Results
-
-Model comparison on the validation set (0.5 threshold):
-
-| Model | Accuracy | ROC-AUC |
-|---|---|---|
-| Logistic Regression (scaled pipeline) | 0.8028 | 0.7030 |
-| HistGradientBoosting | 0.8135 | 0.7719 |
-
-HistGradientBoosting also achieves the lowest validation cost after threshold tuning and is selected as the final model. Frozen model + frozen threshold, evaluated once on the test set (n = 6,000):
-
-| Metric | Value |
-|---|---|
-| Accuracy | 0.6328 |
-| Precision | 0.3532 |
-| Recall | 0.7943 |
-| F1 | 0.4890 |
-| ROC-AUC | 0.7858 |
-| Majority-class baseline accuracy | 0.7788 |
-
-Note: accuracy at the operating point (0.63) is *below* the majority baseline (0.78). That is the direct consequence of the cost assumption below — the 5:1 ratio prioritizes catching defaulters (recall 0.79) over avoiding false alarms (precision 0.35). The model still separates the classes (ROC-AUC 0.79); the threshold minimizes validation cost among the searched candidates rather than maximizing accuracy.
-
-On the held-out test set, the model incurs an illustrative cost of **3,295** (`5 × 273 false negatives + 1,930 false positives`). Predicting no default for everyone incurs **6,635** (`5 × 1,327 false negatives`), so the model reduces this assumed cost by **50.3%**. These are cost units under the stated assumption, not dollars or realized savings.
-
-### Calibration evaluation
-
-Reliability curve on the validation set with per-bin sample sizes (see notebook for the full table). HistGradientBoosting tracks the diagonal reasonably through the populated bins (Brier 0.1381); the top bins are thinly populated (e.g. 55 customers in [0.8, 0.9), 0 in [0.9, 1.0)), so high-probability estimates rest on little data. No post-hoc calibration was applied — and reliability outside this sample is not established.
-
-### Threshold
-
-The 0.5 default is arbitrary. **Illustrative cost assumption** (a modeling choice, not a business fact): a missed defaulter (false negative) costs ~5x a false alarm on a good customer (false positive), i.e. `cost = 5*FN + 1*FP`. Minimized over a 0.10–0.90 grid (0.05 steps) on the **validation** set:
-
-| Threshold | LogReg cost | HGB cost |
-|---|---|---|
-| 0.10 | 4,433 | 3,596 |
-| 0.15 | 4,304 | **3,426** |
-| 0.20 | 4,049 | 3,505 |
-| 0.25 | 3,909 | 3,638 |
-| 0.30 | 4,213 | 3,837 |
-| 0.50 | 5,299 | 4,675 |
-| 0.70 | 6,346 | 5,575 |
-| 0.90 | 6,615 | 6,635 |
-
-(Full 17-point table in the notebook.) The cost curve is U-shaped with an interior minimum: HGB at **0.15** (cost 3,426), beating LogReg's best (0.25, cost 3,909). **Operating threshold: 0.15**, frozen before the single test evaluation. A different cost ratio would justify a different threshold; the selection method is the point. The 0.05 grid is coarse — a finer search could shift the optimum slightly.
-
-### What the data shows (associations, not causes)
-
-Customers two and three months behind on the most recent bill have observed default rates of **69.1% (n = 2,667)** and **75.8% (n = 322)**, respectively. Customers with no consumption, paid-duly status, or revolving credit show rates of approximately 13–17%. Longer-delay groups are much smaller and do not all fall in the 69–76% range. Lower credit limits have a modest negative correlation with default; age has a near-zero Pearson correlation (+0.014), which does not establish an age-risk pattern. These descriptive associations do not establish causation.
-
-## The API
+From the repository root, use Docker with the Compose plugin and a Bash-compatible shell with `curl`. The demo uses the checked-in model and a synthetic input. Once the images have built, the requests take a few seconds.
 
 ```bash
-pip install -r requirements.txt
-python -m src.train                # build models/model.joblib + models/metadata.json
-uvicorn src.app:app --reload       # serves on http://127.0.0.1:8000
+docker compose -p credit-demo up --build --wait
+curl --noproxy 127.0.0.1 -fsS -w '\n' http://127.0.0.1:8080/health
+
+curl --noproxy 127.0.0.1 -fsS -w '\n' -H 'Content-Type: application/json' --data-binary @- \
+  http://127.0.0.1:8080/predict <<'JSON'
+{
+  "LIMIT_BAL": 20000, "SEX": 2, "EDUCATION": 2, "MARRIAGE": 1, "AGE": 35,
+  "PAY_0": 0, "PAY_2": -1, "PAY_3": -1, "PAY_4": 0, "PAY_5": 0, "PAY_6": -1,
+  "BILL_AMT1": 3913, "BILL_AMT2": 3102, "BILL_AMT3": 689, "BILL_AMT4": 0,
+  "BILL_AMT5": 0, "BILL_AMT6": 0, "PAY_AMT1": 0, "PAY_AMT2": 689,
+  "PAY_AMT3": 0, "PAY_AMT4": 0, "PAY_AMT5": 0, "PAY_AMT6": 0
+}
+JSON
 ```
 
-`POST /predict` accepts the 23 features (validated with pydantic; missing or out-of-range fields return 422) and returns:
+Health reports the model and threshold. The prediction returns HTTP 200, writes one audit row, and returns the following JSON.
 
 ```json
-{"default_probability": 0.3568, "threshold": 0.15, "decision": 1}
+{"default_probability": 0.3174, "threshold": 0.15, "decision": 1}
 ```
 
-`decision = 1` means predicted default → **flag for review**. Every call is logged to `data/decisions.db` (timestamp, SHA-256 of the input, probability, threshold, decision; override the location with the `DECISIONS_DB` environment variable). `GET /health` reports model and threshold.
-
-## Tests
+Try an empty JSON object to see a validation error through the same gateway. It returns HTTP 422 and adds zero audit rows.
 
 ```bash
-python -m pytest tests/ -q
+curl --noproxy 127.0.0.1 -sS -i -H 'Content-Type: application/json' --data '{}' http://127.0.0.1:8080/predict
+docker compose -p credit-demo down
 ```
 
-Unit tests require **no download**. 9 tests:
+The demo's SQLite volume survives `down`. For a disposable project whose data you want to remove, use `docker compose -p credit-demo down -v`. See the [Kubernetes runbook](k8s/README.md#windows-docker-desktop-and-powershell) for PowerShell instructions or the [hosted kind run](https://github.com/MarlonPC32/credit-default-decision-service/actions/runs/44679995338) to see the integration test without installing tools.
 
-- train/serve preprocessing consistency on a synthetic fixture (raw record → identical feature vector both paths; undefined codes remapped)
-- integration test against the real `.xls` — **skipped** automatically when the file is absent (run `python scripts/download_data.py` to enable it)
-- `/predict` returns a valid probability and decision
-- `/predict` logs the decision to a **temporary** SQLite database (never the real `decisions.db`)
-- `/predict` rejects missing features and invalid values with 422
-- saved artifacts load and predict
-- `src` imports work as a package (no `sys.path` hacks)
+## Architecture
 
-## Project structure
-
+```mermaid
+flowchart LR
+    Client["Client · loopback or local port-forward"] -->|HTTP| Gateway["Rust gateway · 8080"]
+    Gateway -->|"HTTP via fastapi:8000"| API["FastAPI scoring service"]
+    API -->|loads| Model["Checked-in model and threshold"]
+    API -->|writes audit row| DB[("SQLite · Compose volume or Kubernetes PVC")]
+    Prom["Prometheus · optional Compose"] -.->|scrapes metrics| Gateway
+    Prom -.->|scrapes metrics| API
+    Graf["Grafana · optional Compose"] -.->|queries| Prom
 ```
-credit-default/
-├── data/                    # raw .xls, cleaned csv (decisions.db excluded via .gitignore)
-├── notebooks/
-│   ├── 01_eda.ipynb         # executed
-│   └── 02_modeling.ipynb    # executed
-├── src/
-│   ├── preprocessing.py     # shared cleaning + feature vector (single source of truth)
-│   ├── train.py             # reproduces model artifacts (run: python -m src.train)
-│   └── app.py               # FastAPI risk-scoring service + SQLite logging
-├── tests/test_service.py
-├── models/                  # model.joblib + metadata.json (built by train.py)
-├── scripts/download_data.py
-├── requirements.txt
-└── README.md
+
+| Component | Responsibility |
+|---|---|
+| **Rust** | Axum and Tokio serve HTTP. The gateway bounds request bodies, relays FastAPI responses, and maps upstream failures and timeouts. [Gateway guide](rust-runtime/README.md) |
+| **FastAPI and SQLite** | Pydantic validates the input. FastAPI preprocesses it, runs the scikit-learn model, applies the threshold, and appends the decision to SQLite. [Service](src/app.py) |
+| **Docker Compose** | Runs both services as non-root containers. Only the gateway is published, on `127.0.0.1:8080`. FastAPI uses internal DNS and a named volume for SQLite. [Compose file](compose.yaml) |
+| **Kubernetes** | Internal Services provide DNS, probes control readiness and restarts, and a persistent volume claim (PVC) holds SQLite. Local access uses a gateway port-forward. [Runbook](k8s/README.md) |
+| **Bazel** | Builds and tests the Rust gateway on Linux x86-64 using Bzlmod and the existing Cargo dependency definitions. The Docker builds use Cargo and pip. [Module](MODULE.bazel) |
+| **GitHub Actions** | Runs Rust, Python, Bazel, Docker, and observability checks. A separate workflow creates, tests, and deletes a single-node kind cluster. [CI](.github/workflows/ci.yml) · [kind workflow](.github/workflows/kubernetes-integration.yml) |
+| **Prometheus and Grafana** | Prometheus scrapes both services. Grafana charts request rate, HTTP errors, p95 latency, and upstream health. [Optional Compose file](compose.observability.yaml) |
+
+## Verification
+
+The linked runs record successful checks at the audited implementation commit `7c7874e`. See [Actions](https://github.com/MarlonPC32/credit-default-decision-service/actions) for later runs.
+
+| Check | Verified result |
+|---|---|
+| Cargo | Formatting and locked build passed. **11 Rust tests passed**, including forwarding, size limits, upstream failures, timeouts, and metrics. [CI run](https://github.com/MarlonPC32/credit-default-decision-service/actions/runs/44679995342) |
+| Python | **10 passed, 1 skipped**. The skip requires the optional raw UCI spreadsheet. Tests cover preprocessing, validation, model loading, audit writes, and telemetry. [CI run](https://github.com/MarlonPC32/credit-default-decision-service/actions/runs/44679995342) |
+| Bazel | Locked gateway build and Rust test target passed on Ubuntu x86-64 with Bazel 8.5.0. [CI run](https://github.com/MarlonPC32/credit-default-decision-service/actions/runs/44679995342) |
+| Docker and observability | Both application images built. Prometheus scraped both services, Grafana queried the provisioned datasource, and the smoke test checked request metrics and sanitized logs. [CI run](https://github.com/MarlonPC32/credit-default-decision-service/actions/runs/44679995342) |
+| Kubernetes | Hosted single-node kind verified ready Pods, Service DNS, a writable bound PVC, HTTP 200/400/422, zero rows for invalid requests, and one audit row that survived FastAPI Pod replacement. [kind run](https://github.com/MarlonPC32/credit-default-decision-service/actions/runs/44679995338) |
+| Windows runbook | PowerShell blocks passed syntax checks. Live Kubernetes verification used hosted kind on Ubuntu. [PowerShell instructions](k8s/README.md#windows-docker-desktop-and-powershell) |
+
+## Model evaluation
+
+The [UCI Default of Credit Card Clients dataset](https://archive.ics.uci.edu/dataset/350/default+of+credit+card+clients) contains 30,000 historical records from Taiwan with 6,636 defaults (22.12%). The 23 features cover credit limit, demographics, repayment history, bills, and payments. The [preprocessing module](src/preprocessing.py) shares feature ordering and category normalization between training and serving. It drops the original ID and renames the target to `default`.
+
+[Training](src/train.py) uses a stratified 60/20/20 train/validation/test split with seed 42. It compares logistic regression and histogram gradient boosting (HGB), selects the model and threshold on validation, and evaluates the frozen choice on 6,000 held-out rows. [Exploration notebook](notebooks/01_eda.ipynb) · [Modeling notebook](notebooks/02_modeling.ipynb) · [Checked-in metadata](models/metadata.json)
+
+### Current threshold and historical context
+
+- **Current threshold: 0.15.** HGB had the lowest validation cost on the 0.10–0.90 grid with steps of 0.05. The illustrative cost is `5 × false negatives + false positives`. HGB cost **3,426** at 0.15 and **3,837** at 0.30 on the current validation set.
+- **Historical threshold: 0.30.** The first artifact selected from three thresholds using the same test split on which it reported performance. The later validation-first protocol selected 0.15, and the model binary was regenerated. The evaluation protocols differ. [Original metadata](https://github.com/MarlonPC32/credit-default-decision-service/blob/79c335ea0aa016b03ec3d9debd6113ff4ffe2e6d/models/metadata.json) · [Protocol change](https://github.com/MarlonPC32/credit-default-decision-service/commit/5e058a9e89910bd462f38d0b6ee7deddd069f747) · [Model regeneration](https://github.com/MarlonPC32/credit-default-decision-service/commit/a56c3ce0b5dcf8cf528adadb08a31bb49af88492)
+
+| Held-out metric | Value |
+|---|---:|
+| ROC-AUC | 0.7858 |
+| Recall | 0.7943 |
+| Precision | 0.3532 |
+| F1 | 0.4890 |
+| Accuracy | 0.6328 |
+| Always predict no default · accuracy | 0.7788 |
+| HGB illustrative cost | 3,295 |
+| Always predict no default · illustrative cost | 6,635 |
+
+The threshold prioritizes catching more defaults and flags more good customers for review. Cost is reported in assumed units. Validation Brier score was **0.1381**. The reliability curve has few high-probability examples, so interpret that range cautiously. [Modeling notebook](notebooks/02_modeling.ipynb)
+
+## Developer guide
+
+### HTTP and audit behavior
+
+| Endpoint or condition | Behavior |
+|---|---|
+| `GET /health` | Reports the model and threshold through the gateway. |
+| `POST /predict` | FastAPI validates the 23 features, scores the record, and writes one row for a successful prediction. |
+| Client errors | The gateway relays FastAPI's HTTP 400 for body decoding and 422 for invalid JSON or fields. The gateway returns 413 for bodies over 64 KiB. |
+| Upstream failures | The gateway returns 502 for connection errors or unexpected statuses and 504 for a non-connection upstream timeout. It applies a five-second outbound deadline and disables its own retries and redirects. |
+| `GET /metrics` | Both services expose Prometheus counters and latency histograms. The gateway also counts upstream failures by reason. |
+
+FastAPI compares the full-precision score with 0.15 using `>=`, then rounds the response probability to four decimal places. Use the returned `decision` near the boundary. SQLite stores a timestamp, SHA-256 digest of the validated input, full-precision score, threshold, and decision. [FastAPI implementation](src/app.py) · [Rust implementation](rust-runtime/src/main.rs)
+
+| Setting | Local default or example |
+|---|---|
+| `FASTAPI_BASE_URL` | Required by the gateway. Use `http://127.0.0.1:8000` for native development. Compose and Kubernetes set `http://fastapi:8000`. |
+| `GATEWAY_BIND_ADDR` | Defaults to `127.0.0.1:8080`. Container configurations bind to `0.0.0.0:8080` inside the container. |
+| `DECISIONS_DB` | Native default is `data/decisions.db`. Compose and Kubernetes use `/var/lib/credit-default/decisions.db` on their mounted volumes. |
+
+### Native setup and checks
+
+Use Python 3.12.14 and Rust 1.91.1 to match CI. Run the Python commands in a virtual environment from the repository root. The [gateway guide](rust-runtime/README.md#run-locally) shows how to start the two processes in separate terminals.
+
+```bash
+python -m pip install --only-binary=:all: -r requirements.txt -c requirements-docker.lock
+python -m pip check
+OMP_NUM_THREADS=2 python -m pytest tests/ -q -rs
+(cd rust-runtime && cargo fmt --check && cargo test --locked && cargo build --locked)
 ```
+
+The checked-in artifacts support the demo without training. To regenerate them deliberately, run `OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 python -m src.train`. The optional raw-file test uses the spreadsheet fetched by `python scripts/download_data.py` when the UCI archive is reachable.
+
+### Bazel on Linux x86-64
+
+Use Bazel 8.5.0. Bzlmod pins the rules, and `rules_rust` reads `rust-runtime/Cargo.toml` and `rust-runtime/Cargo.lock`. The first build downloads the rules, Rust 1.91.1 toolchain, and crates.
+
+```bash
+bazel build --lockfile_mode=error //rust-runtime:credit-default-gateway
+bazel test --lockfile_mode=error --test_output=errors //rust-runtime:gateway_test
+```
+
+After changing Cargo dependencies, refresh `Cargo.lock` with Cargo and run Bazel without `--lockfile_mode=error` to refresh `MODULE.bazel.lock` if needed. Review both lockfiles.
+
+### Optional monitoring
+
+Start from a fresh Compose project for the smoke test. Stop the quick demo first to free port 8080. The smoke script sends one synthetic validation failure and checks fresh counters, Grafana's datasource query, and structured logs.
+
+```bash
+export COMPOSE_PROJECT_NAME=credit-observability-demo
+docker compose -f compose.yaml -f compose.observability.yaml up --build --wait
+python3 observability/smoke.py
+docker compose -f compose.yaml -f compose.observability.yaml logs --tail 50 gateway fastapi
+```
+
+Open Grafana at `http://127.0.0.1:3000/d/credit-service` (local anonymous viewer) and Prometheus targets at `http://127.0.0.1:9090/targets`. Generate requests over at least two five-second scrape intervals to see rates. The logs include method, normalized route, status, duration, and gateway upstream failure reasons. They omit raw URLs, bodies, headers, and audit hashes. Use `docker compose -f compose.yaml -f compose.observability.yaml down` to stop the stack and preserve named volumes. Prometheus retains seven days of history.
+
+### Builds behind a TLS-inspecting proxy
+
+Use the standard Compose command with publicly trusted registries. If the build environment requires an approved additional CA, save this override as `compose.cloud.yaml` outside the checkout. The example uses the Codex Linux CA bundle.
+
+```yaml
+services:
+  fastapi:
+    build:
+      secrets: [build_ca]
+  gateway:
+    build:
+      secrets: [build_ca]
+secrets:
+  build_ca:
+    file: /etc/ssl/certs/ca-certificates.crt
+```
+
+Use `docker compose -f compose.yaml -f /path/to/compose.cloud.yaml up --build --wait`. Include `-f compose.observability.yaml` when starting monitoring. BuildKit mounts the bundle only during package downloads, with TLS verification enabled.
 
 ## Limitations
 
-- **Existing customers, not applicants**: this scores customers with six months of history. It is not validated as an approval policy for new applicants, and `decision = 1` is a review flag, not a rejection.
-- **No timestamps** in the dataset: out-of-time evaluation is not supported. This classifies a snapshot; it is not a validated production risk system.
-- **Taiwan, 2005**: a 20-year-old portfolio from one market. Feature distributions and default behavior will differ elsewhere.
-- Single split, no cross-validation; threshold grid at 0.05 steps is coarse.
-- The 5:1 cost ratio is an explicit illustrative assumption, not an observed business fact.
-- Probability reliability outside this sample is not established.
-- A real deployment would need monitoring for distribution shift, adverse-action explanations, and fairness review — none of which are in scope here.
+- **Evaluation scope.** One historical cohort and one stratified split support the reported metrics. Temporal validation, cross-validation, generalization to other populations, and fairness review remain outside the evaluation. The flag is for review of existing customers.
+- **Operational scope.** The project was exercised in local containers and single-node hosted kind. The local PVC survived a Pod replacement. Node failover, multi-node storage, and production deployment remain outside that scope.
+- **Audit semantics.** SQLite serializes writers. The manifests use one FastAPI replica and a `Recreate` update strategy. If a response is lost after the database commit, a client retry can create a second row. Treat the database as sensitive, including its deterministic hashes.
+- **Access and monitoring.** The demo relies on loopback and internal networking. Application authentication and TLS are outside its scope. The Grafana viewer is intended for local use, and the dashboard shows service behavior rather than model drift or calibration.
+
+## Repository map
+
+| Path | Contents |
+|---|---|
+| [`rust-runtime/`](rust-runtime/) | Gateway, telemetry, and Rust tests |
+| [`src/`](src/), [`tests/`](tests/) | Python service, preprocessing, training, and tests |
+| [`models/`](models/), [`data/`](data/), [`notebooks/`](notebooks/) | Model artifacts, cleaned dataset, and evaluation |
+| [`k8s/`](k8s/), [`observability/`](observability/) | Local Kubernetes and monitoring definitions, runbooks, and smoke tests |
+| [`.github/workflows/`](.github/workflows/) | Build, test, and hosted kind workflows |
